@@ -1,0 +1,38 @@
+ci:
+    skip: [ruff, pyright]
+
+default_install_hook_types:
+  - pre-commit
+  - post-checkout
+  - post-merge
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-yaml
+        args: [--unsafe]
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+
+  - repo: https://github.com/kynan/nbstripout
+    rev: 0.7.1
+    hooks:
+      - id: nbstripout
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.0
+    hooks:
+      - id: ruff
+        types_or: [ python, pyi, jupyter ]
+        args: [ --fix ]
+        exclude: 'src/localization-tutorial\.*'
+
+      - id: ruff-format
+        types_or: [ python, pyi, jupyter ]
+        exclude: 'src/localization-tutorial\.*'
+
+  - repo: https://github.com/RobertCraigie/pyright-python
+    rev: v1.1.369
+    hooks:
+    - id: pyright
