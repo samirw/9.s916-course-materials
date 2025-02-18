@@ -1129,7 +1129,7 @@ def MCMC_handler(widget, k, readings):
         return (
             jax.tree.map(
                 lambda x, y: jnp.where(accept, x, y),
-                (new_pose, posterior),
+                (new_pose, posterior_density),
                 (pose, posterior_density)
             ),
             None
