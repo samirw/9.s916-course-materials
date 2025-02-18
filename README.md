@@ -2,7 +2,7 @@
 
 ## Setup
 
-Run `scripts/bootstrap-env.sh`
+Run `scripts/bootstrap-env.sh` then restart your terminal (or re-source your shell config).
 
 Ensure Python environment refers to `.pixi/envs/default`, especially to the executable `.pixi/envs/default/bin/python`.
 
