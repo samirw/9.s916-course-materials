@@ -33,20 +33,18 @@
 #
 # Dependencies are specified in pyproject.toml.
 # %%
-# Global setup code
+# Global includes
 
 import json
 import genstudio.plot as Plot
-import itertools
 import jax
 import jax.numpy as jnp
 import genjax
-import os
 from genjax import SelectionBuilder as S
 from genjax import ChoiceMapBuilder as C
 from genjax.typing import Array, FloatArray, PRNGKey, IntArray
 from penzai import pz
-from typing import Any, Iterable, TypeVar, Generic, Callable
+from typing import TypeVar, Generic, Callable
 from genstudio.plot import js
 
 html = Plot.Hiccup
@@ -99,7 +97,7 @@ def make_world(wall_verts, clutters_vec):
     # Calculate bounding box, box size, and center point
     bounding_box = jnp.array([[x_min, x_max], [y_min, y_max], [-jnp.pi, +jnp.pi]])
     box_size = max(x_max - x_min, y_max - y_min)
-    center_point = jnp.array([(x_min + x_max) / 2.0, (y_min + y_max) / 2.0])
+    center_point = jnp.array([(x_min + x_max) / 2, (y_min + y_max) / 2])
 
     return {
             "walls": walls,
@@ -142,7 +140,7 @@ def load_world(file_name):
 # %%
 # Specific example code here
 
-world = load_world("world.json");
+world = load_world("world.json")
 
 # %% [markdown]
 # ### Plotting
@@ -160,8 +158,10 @@ walls_plot = Plot.new(
     Plot.domain(world["bounding_box"][0]),
 )
 
-world_plot = Plot.new(
-    walls_plot, Plot.frame(strokeWidth=4, stroke="#ddd"), Plot.color_legend()
+world_plot = (
+    walls_plot
+    + Plot.frame(strokeWidth=4, stroke="#ddd")
+    + Plot.color_legend()
 )
 
 clutters_plot = (
@@ -240,7 +240,7 @@ class Pose(genjax.PythonicPytree):
 
 # %%
 def pose_wings(pose, opts={}):
-    return Plot.line(js(f"""
+    return Plot.line(js("""
                    const pose = %1;
                    let positions = pose.p;
                    let angles = pose.hd;
@@ -270,7 +270,7 @@ def pose_wings(pose, opts={}):
                 **opts)
 
 def pose_body(pose, opts={}):
-    return Plot.dot(js(f"typeof %1.hd === 'number' ? [%1.p] : %1.p", pose), {"r": 4} | opts)
+    return Plot.dot(js("typeof %1.hd === 'number' ? [%1.p] : %1.p", pose), {"r": 4} | opts)
 
 def pose_plots(poses, wing_opts={}, body_opts={}, **opts):
     """
@@ -370,12 +370,12 @@ def distance(p, seg, PARALLEL_TOL=1.0e-6):
         jnp.abs(det) < PARALLEL_TOL,
         jnp.array([jnp.nan, jnp.nan]),
         jnp.array([
-            (segdp[0] * pq[1] - segdp[1] * pq[0]) / det,
-            (pdp[0] * pq[1] - pdp[1] * pq[0]) / det
-        ])
+            segdp[0] * pq[1] - segdp[1] * pq[0],
+              pdp[0] * pq[1] -   pdp[1] * pq[0]
+        ]) / det
     )
     return jnp.where(
-        (st[0] >= 0.0) & (st[1] >= 0.0) & (st[1] <= 1.0),
+        (st[0] >= 0) & (st[1] >= 0) & (st[1] <= 1),
         st[0],
         jnp.inf
     )
@@ -391,7 +391,7 @@ sensor_settings = {
 def sensor_distance(pose, walls, box_size):
     d = jnp.min(jax.vmap(distance, in_axes=(None, 0))(pose, walls))
     # Capping to a finite value avoids issues below.
-    return jnp.where(jnp.isinf(d), 2.0 * box_size, d)
+    return jnp.where(jnp.isinf(d), 2 * box_size, d)
 
 # This represents a "fan" of sensor angles, with given field of vision, centered at angle 0.
 
@@ -440,9 +440,8 @@ def update_ideal_sensors(widget, label):
         (label + "_readings"): ideal_sensor(pose_at(widget.state, label))
     })
 
-def on_pose_change(widget, _):
-    update_ideal_sensors(widget, "pose")
 
+some_pose = Pose(jnp.array([6.0, 15.0]), jnp.array(0.0))
 (
     (
         world_plot
@@ -453,7 +452,9 @@ def on_pose_change(widget, _):
     | Plot.initialState({
         "pose_readings": ideal_sensor(some_pose)
     })
-    | Plot.onChange({"pose": on_pose_change})
+    | Plot.onChange({
+        "pose": lambda widget, _: update_ideal_sensors(widget, "pose")
+    })
 )
 
 # %% [markdown]
@@ -486,7 +487,7 @@ Plot.Frames([
 # Its declarative model in `Gen` starts with the case of just one sensor reading:
 
 # %%
-sensor_settings["s_noise"] = 0.10
+sensor_settings["s_noise"] = 0.1
 
 @genjax.gen
 def sensor_model_one(pose, angle, s_noise):
@@ -506,6 +507,7 @@ def sensor_model_one(pose, angle, s_noise):
 
 # %%
 key, sub_key = jax.random.split(key)
+some_pose = Pose(jnp.array([6.0, 15.0]), jnp.array(0.0))
 cm, score, retval = sensor_model_one.propose(sub_key, (some_pose, sensor_angles[0], sensor_settings["s_noise"]))
 retval
 
@@ -523,6 +525,7 @@ sensor_model = sensor_model_one.vmap(in_axes=(None, 0, None))
 
 # %%
 key, sub_key = jax.random.split(key)
+some_pose = Pose(jnp.array([6.0, 15.0]), jnp.array(0.0))
 cm, score, retval = sensor_model.propose(sub_key, (some_pose, sensor_angles, sensor_settings["s_noise"]))
 retval
 
@@ -568,6 +571,7 @@ def on_slider_change(widget, _):
     update_noisy_sensors(widget, "pose", "noise_slider")
 
 key, k1, k2 = jax.random.split(key, 3)
+some_pose = Pose(jnp.array([6.0, 15.0]), jnp.array(0.0))
 (
     (
         world_plot
@@ -603,6 +607,7 @@ jnp.exp(score)
 # The construction of a log density function is automated by the `assess` semantics for generative functions.  This method is passed a choice map and a tuple of arguments, and it returns the log score plus the return value.
 
 # %%
+some_pose = Pose(jnp.array([6.0, 15.0]), jnp.array(0.0))
 score, retval = sensor_model.assess(cm, (some_pose, sensor_angles, sensor_settings["s_noise"]))
 jnp.exp(score)
 
@@ -625,7 +630,7 @@ jnp.exp(score)
 # %%
 key, k1, k2, k3 = jax.random.split(key, 4)
 
-guess_pose = Pose(jnp.array([2.0, 16]), jnp.array(0.0))
+guess_pose = Pose(jnp.array([2.0, 16.0]), jnp.array(0.0))
 target_pose = Pose(jnp.array([15.0, 4.0]), jnp.array(-1.6))
 
 def likelihood_function(cm, pose, s_noise):
@@ -702,21 +707,17 @@ def on_target_pose_chage(widget, _):
     | noise_slider("noise_slider", "Sensor noise =", sensor_settings["s_noise"])
     | (
         Plot.html([
-            "div",
-            {"class": "flex flex-col gap-4"},
+            "label",
+            {"class": "flex items-center gap-2 cursor-pointer"},
             [
-                "label",
-                {"class": "flex items-center gap-2 cursor-pointer"},
-                [
-                    "input",
-                    {
-                        "type": "checkbox",
-                        "checked": js("$state.show_target_pose"),
-                        "onChange": js("(e) => $state.show_target_pose = e.target.checked")
-                    }
-                ],
-                "show target pose"
-            ]
+                "input",
+                {
+                    "type": "checkbox",
+                    "checked": js("$state.show_target_pose"),
+                    "onChange": js("(e) => $state.show_target_pose = e.target.checked")
+                }
+            ],
+            "show target pose"
         ])
         & Plot.html(js("`guess = Pose([${$state.guess.p.map((x) => x.toFixed(2))}], ${$state.guess.hd.toFixed(2)})`"))
         & Plot.html(js("`target = Pose([${$state.target.p.map((x) => x.toFixed(2))}], ${$state.target.hd.toFixed(2)})`"))
@@ -775,7 +776,7 @@ some_poses = jax.vmap(lambda k: whole_map_prior.simulate(k, ()))(jax.random.spli
 # %%
 # Even mixture of uniform priors over two rooms.
 
-room_mixture = jnp.ones(2)
+room_mixture = jnp.ones(2) / 2
 room1 = jnp.array([[12.83, 15.81], [11.19, 15.26], [-jnp.pi, +jnp.pi]])
 room2 = jnp.array([[15.73, 18.90], [ 5.79,  9.57], [-jnp.pi, +jnp.pi]])
 
@@ -786,7 +787,7 @@ two_room_prior = genjax.mix(
 
 def two_room_cm_builder(pose):
     return (
-        C["mixture_component"].set(jnp.array(pose.p[1] < 10.0, int))
+        C["mixture_component"].set(jnp.array(pose.p[1] < 10, int))
         | C["component_sample", "p_array"].set(pose.as_array())
     )
 
@@ -803,7 +804,7 @@ some_poses = jax.vmap(lambda k: two_room_prior.simulate(k, ()))(jax.random.split
 
 # %%
 # Prior localized around a single pose
-pose_for_localized_prior = Pose(jnp.array([2.0, 16]), jnp.array(0.0))
+pose_for_localized_prior = Pose(jnp.array([2.0, 16.0]), jnp.array(0.0))
 spread_of_localized_prior = (0.1, 0.75)
 @genjax.gen
 def localized_prior():
@@ -916,26 +917,20 @@ def camera_widget(
         | noise_slider("model_noise", "Model/inference noise = ", sensor_settings["s_noise"])
         | (
             Plot.html([
-                "div",
-                {"class": "flex flex-col gap-4"},
-                [
-                    "button",
-                    {
-                        "class": "w-24 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 active:bg-blue-700",
-                        "onClick": on_camera_button(button_handler)
-                    },
-                    button_label
-                ]
+                "button",
+                {
+                    "class": "w-24 px-4 py-2 bg-blue-500 text-white rounded hover:bg-blue-600 active:bg-blue-700",
+                    "onClick": on_camera_button(button_handler)
+                },
+                button_label
             ])
-            & Plot.html([
-                "div",
+            & Plot.html(
                 Plot.js("""`camera = Pose([${$state.camera.p.map((x) => x.toFixed(2))}], ${$state.camera.hd.toFixed(2)})`""")
-            ])
-            & Plot.html([
-                "div",
+            )
+            & Plot.html(
                 Plot.js("""$state.target_exists ?
                                 `target = Pose([${$state.target.p.map((x) => x.toFixed(2))}], ${$state.target.hd.toFixed(2)})` : ''""")
-            ])
+            )
             & bottom_elements
         )
         | Plot.initialState(
@@ -975,7 +970,7 @@ N_keep = 1000  # keep the top this many out of the total `jnp.prod(N_grid)` of t
 
 key, sub_key = jax.random.split(key)
 
-camera_pose = Pose(jnp.array([2.0, 16]), jnp.array(0.0))
+camera_pose = Pose(jnp.array([2.0, 16.0]), jnp.array(0.0))
 
 def grid_search_handler(widget, k, readings):
     model_noise = float(getattr(widget.state, "model_noise"))
@@ -995,16 +990,15 @@ camera_widget(
     "grid search",
     grid_search_handler,
     result_plots=(
-        pose_plots(js("$state.grid_poses"), color="green", opacity=jnp.arange(1.0, 0.0, -1.0/N_keep))
+        pose_plots(js("$state.grid_poses"), color="green", opacity=jnp.arange(1.0, 0.0, -1/N_keep))
         + pose_plots(js("$state.best"), color="purple")
     ),
     bottom_elements=(
-        Plot.html([
-            "div",
+        Plot.html(
             # For some reason `toFixed` very stubbonrly malfunctions in the following line:
             Plot.js("""$state.target_exists ?
                                 `best = Pose([${$state.best.p.map((x) => x.toFixed(2))}], ${$state.best.hd.toFixed(2)})` : ''""")
-        ])
+        )
     ),
     initial_state={
         "grid_poses": {"p": [], "hd": []},
@@ -1040,7 +1034,7 @@ def grid_approximation_handler(widget, k, readings):
     grid_poses = make_poses_grid(world["bounding_box"], N_grid)
     posterior_densities = jax.vmap(jitted_posterior)(grid_poses)
     def grid_sample_one(k):
-        return grid_poses[genjax.categorical.sample(k, posterior_densities)]
+        return grid_poses[genjax.categorical.propose(k, (posterior_densities,))[2]]
 
     grid_samples = jax.vmap(grid_sample_one)(jax.random.split(k, N_samples))
     widget.state.update({
@@ -1082,7 +1076,7 @@ def importance_resampling_handler(widget, k, readings):
         k1, k2 = jax.random.split(k)
         presamples = jax.vmap(random_pose)(jax.random.split(k1, N_presamples))
         posterior_densities = jax.vmap(jitted_posterior)(presamples)
-        return presamples[genjax.categorical.sample(k2, posterior_densities)]
+        return presamples[genjax.categorical.propose(k2, (posterior_densities,))[2]]
 
     grid_samples = jax.vmap(importance_resample_one)(jax.random.split(k, N_samples))
     widget.state.update({
@@ -1125,7 +1119,7 @@ def MCMC_handler(widget, k, readings):
         new_p_hd = jax.random.uniform(k1, shape=(3,), minval=mins, maxval=maxs)
         new_pose = Pose(new_p_hd[0:2], new_p_hd[2])
         new_posterior = jitted_posterior(new_pose)
-        accept = (jnp.log(genjax.uniform.sample(k2)) <= new_posterior - posterior_density)
+        accept = (jnp.log(genjax.uniform.propose(k2, ())[2]) <= new_posterior - posterior_density)
         return (
             jax.tree.map(
                 lambda x, y: jnp.where(accept, x, y),
@@ -1180,7 +1174,6 @@ def load_robot_program(file_name):
     Returns:
     - tuple: A tuple containing the initial state, and the total number of control steps.
     """
-    # TODO: change these to urlopen when the repo becomes public
     robot_program = load_file(file_name)
 
     start = Pose(
@@ -1377,7 +1370,11 @@ def step_model(motion_settings, start, control):
 
 
 # Set the motion settings
-default_motion_settings = {"p_noise": 0.5, "hd_noise": 2 * jnp.pi / 36.0}
+degrees = jnp.pi / 180
+default_motion_settings = {
+    "p_noise": 0.15,
+    "hd_noise": 1 * degrees
+}
 
 # %% [markdown]
 # The reader is especially encouraged, in the following widget, to drag the attempted step beyond a wall, to get a feel for how this model handles the physics.
@@ -1402,7 +1399,7 @@ def update_confidence_circle(widget, _):
     tilted_start = Pose(robot_inputs["start"].p, tilted_start_hd)
 
     ds = jnp.linalg.norm(step_vector)
-    dhd = (step.hd - tilted_start_hd + jnp.pi) % (2.0 * jnp.pi) - jnp.pi
+    dhd = (step.hd - tilted_start_hd + jnp.pi) % (2 * jnp.pi) - jnp.pi
 
     widget.state.update({
         "start": tilted_start.as_dict(),
@@ -1459,14 +1456,22 @@ def update_confidence_circle(widget, _):
 # Thus `path_model` returns a tuple whose second entry is the sampled path (and whose first entry duplicates the final position).
 
 # %%
-path_model = step_model.partial_apply(default_motion_settings).map(diag).scan()
+@genjax.gen
+def path_model(motion_settings):
+    return (
+        step_model
+        .partial_apply(motion_settings)
+        .map(diag)
+        .scan()(robot_inputs["start"], robot_inputs["controls"])
+        @ "steps"
+    )
 
 # %% [markdown]
 # Note how the model returns a tuple with the terminus of the sampled path, followed by the path itself vectorized into a single `Pose` object.
 
 # %%
 key, sub_key = jax.random.split(key)
-path_model.propose(sub_key, (robot_inputs["start"], robot_inputs["controls"]))[2]
+path_model.propose(sub_key, (default_motion_settings,))[2]
 
 
 # %% [markdown]
@@ -1487,7 +1492,7 @@ def plot_path_with_confidence(path, step):
     )
 
 key, sample_key = jax.random.split(key)
-path = path_model.propose(sample_key, (robot_inputs["start"], robot_inputs["controls"]))[2][1]
+path = path_model.propose(sample_key, (default_motion_settings,))[2][1]
 Plot.Frames(
     [
         plot_path_with_confidence(path, step)
@@ -1506,7 +1511,7 @@ N_samples = 12
 key, sub_key = jax.random.split(key)
 sample_paths = jax.vmap(
     lambda k:
-        path_model.propose(k, (robot_inputs["start"], robot_inputs["controls"]))[2][1]
+        path_model.propose(k, (default_motion_settings,))[2][1]
 )(jax.random.split(sub_key, N_samples))
 
 Plot.html([
@@ -1531,8 +1536,7 @@ def full_model_kernel(motion_settings, s_noise, state, control):
 def full_model(motion_settings, s_noise):
     return (
         full_model_kernel
-        .partial_apply(motion_settings)
-        .partial_apply(s_noise)
+        .partial_apply(motion_settings, s_noise)
         .map(diag)
         .scan()(robot_inputs["start"], robot_inputs["controls"])
         @ "steps"
@@ -1569,6 +1573,7 @@ def animate_path_and_sensors(path, readings, motion_settings, frame_key=None):
         for step, pose in enumerate(path)
     ], fps=2, key=frame_key)
 
+# %%
 animate_path_and_sensors(retval[1], cm["steps", "sensor", "distance"], default_motion_settings)
 
 # %% [markdown]
@@ -1638,39 +1643,32 @@ pz.ts.display(trace)
 #
 # One could, for instance, consider just the placement of the first step, and replace its stochastic choice of heading with an updated value. The original trace was typical under the pose prior model, whereas the modified one may be rather less likely. This plot is annotated with log of how much unlikelier, the score ratio:
 # %%
-key, sub_key = jax.random.split(key)
+key, k1, k2 = jax.random.split(key, 3)
 trace = step_model.simulate(
-    sub_key,
+    k1,
     (default_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]),
 )
-
-key, sub_key = jax.random.split(key)
 rotated_trace, rotated_trace_weight_diff, _, _ = trace.update(
-    sub_key, C["hd"].set(jnp.pi / 2.0)
+    k2, C["hd"].set(jnp.pi / 2)
 )
 
 (
-    Plot.new(
-        world_plot
-        + pose_plots(trace.get_retval(), color=Plot.constantly("some pose"))
-        + pose_plots(
-            rotated_trace.get_retval(), color=Plot.constantly("with heading modified")
-        )
-        + Plot.color_map({"some pose": "green", "with heading modified": "red"})
-        + Plot.title("Modifying a heading")
+    world_plot
+    + pose_plots(trace.get_retval(), color=Plot.constantly("some pose"))
+    + pose_plots(
+        rotated_trace.get_retval(), color=Plot.constantly("with heading modified")
     )
-    | html("span.tc", f"score ratio: {rotated_trace_weight_diff}")
-)
+    + Plot.color_map({"some pose": "green", "with heading modified": "red"})
+    + Plot.title("Modifying a heading")
+) | html(f"score ratio: {rotated_trace_weight_diff}")
 
 # %% [markdown]
 # It is worth carefully thinking through a trickier instance of this.  Suppose instead, within the full path, we replaced the first step's stochastic choice of heading with some specific value.
 # %%
-key, sub_key = jax.random.split(key)
-trace = path_model.simulate(sub_key, (robot_inputs["start"], robot_inputs["controls"]))
-key, sub_key = jax.random.split(key)
-
+key, k1, k2 = jax.random.split(key, 3)
+trace = path_model.simulate(k1, (default_motion_settings,))
 rotated_first_step, rotated_first_step_weight_diff, _, _ = trace.update(
-    sub_key, C[0, "hd"].set(jnp.pi / 2.0)
+    k2, C["steps", 0, "hd"].set(jnp.pi / 2)
 )
 
 # %% [markdown]
@@ -1688,7 +1686,7 @@ rotated_first_step, rotated_first_step_weight_diff, _, _ = trace.update(
         for pose in trace.get_retval()[1]
     ]
     + Plot.color_map({"some path": "green", "with heading modified": "red"})
-) | html("span.tc", f"score ratio: {rotated_first_step_weight_diff}")
+) | html(f"score ratio: {rotated_first_step_weight_diff}")
 
 
 # %% [markdown]
@@ -1712,9 +1710,9 @@ def animate_full_trace(trace, frame_key=None):
         path, readings, motion_settings, frame_key=frame_key
     )
 
+# %%
 key, sub_key = jax.random.split(key)
 tr = full_model.simulate(sub_key, (default_motion_settings, sensor_settings["s_noise"]))
-
 animate_full_trace(tr)
 
 # %% [markdown]
@@ -1722,25 +1720,28 @@ animate_full_trace(tr)
 #
 # Let us generate some fixed synthetic motion data that, for pedagogical purposes, we will work with as if it were the actual path of the robot.  We will generate two versions, one each with low or high motion deviation.
 # %%
-# HERE is a great place to update `sensor_settings["s_noise"]` if you wish,
-# about to construct some "data" using it.
-
 motion_settings_low_deviation = {
     "p_noise": 0.05,
-    "hd_noise": (1 / 10.0) * 2 * jnp.pi / 360,
+    "hd_noise": (1 / 10) * degrees,
 }
 motion_settings_high_deviation = {
-    "p_noise": 0.25,
-    "hd_noise": 2 * jnp.pi / 360,
+    "p_noise": 0.4,
+    "hd_noise": 2 * degrees,
 }
 
 key, k_low, k_high = jax.random.split(key, 3)
 trace_low_deviation = full_model.simulate(k_low, (motion_settings_low_deviation, sensor_settings["s_noise"]))
 trace_high_deviation = full_model.simulate(k_high, (motion_settings_high_deviation, sensor_settings["s_noise"]))
 
-animate_full_trace(trace_low_deviation)
-# %%
-animate_full_trace(trace_high_deviation)
+(
+    (
+        html("low motion-deviation data")
+        | animate_full_trace(trace_low_deviation, frame_key="frame")
+    ) & (
+        html("high motion-deviation data")
+        | animate_full_trace(trace_high_deviation, frame_key="frame")
+    )
+) | Plot.Slider("frame", 0, T, fps=2)
 # %% [markdown]
 # Since we imagine these data as having been recorded from the real world, keep only their extracted data, *discarding* the traces that produced them.
 # %%
@@ -1762,24 +1763,23 @@ constraints_high_deviation = C["steps", "sensor", "distance"].set(observations_h
 
 
 # %%
-def animate_bare_sensors(path, plot_base=[]):
-    def frame(pose, readings1, readings2):
-        def plt(readings):
-            return Plot.new(
-                plot_base or Plot.domain([0, 20]),
-                plot_sensors(pose, readings, sensor_angles, show_legend=True),
-                {"width": 400, "height": 400},
-            )
+empty_world = Plot.new(
+    {"margin": 0, "inset": 50, "width": 500, "axis": None, "aspectRatio": 1},
+    Plot.domain(world["bounding_box"][0]),
+)
 
-        return plt(readings1) & plt(readings2)
-
-    return Plot.Frames([
-        frame(*scene)
-        for scene in zip(path, observations_low_deviation, observations_high_deviation)
-    ], fps=2)
-
-
-animate_bare_sensors(itertools.repeat(Pose(world["center_point"], 0.0)))
+(
+    Plot.Frames([
+        empty_world
+        + plot_sensors(Pose(world["center_point"], 0.0), readings, sensor_angles, show_legend=True)
+        for readings in observations_low_deviation
+    ], key="frame")
+    & Plot.Frames([
+        empty_world
+        + plot_sensors(Pose(world["center_point"], 0.0), readings, sensor_angles, show_legend=True)
+        for readings in observations_high_deviation
+    ], key="frame")
+) | Plot.Slider("frame", 0, T, fps=2)
 # %% [markdown]
 # ## Inference over robot paths
 #
@@ -1787,8 +1787,18 @@ animate_bare_sensors(itertools.repeat(Pose(world["center_point"], 0.0)))
 #
 # The path obtained by integrating the controls serves as a proposal for the true path, but it is unsatisfactory, especially in the high motion deviation case. The picture gives an intuitive sense of the (poor) fit:
 # %%
-
-animate_bare_sensors(path_integrated, world_plot)
+(
+    Plot.Frames([
+        world_plot
+        + plot_sensors(pose, readings, sensor_angles, show_legend=True)
+        for (pose, readings) in zip(path_integrated, observations_low_deviation)
+    ], key="frame")
+    & Plot.Frames([
+        world_plot
+        + plot_sensors(pose, readings, sensor_angles, show_legend=True)
+        for (pose, readings) in zip(path_integrated, observations_high_deviation)
+    ], key="frame")
+) | Plot.Slider("frame", 0, T, fps=2)
 # %% [markdown]
 # It would seem that the fit is reasonable in low motion deviation, but really breaks down in high motion deviation.
 #
@@ -1802,19 +1812,26 @@ animate_bare_sensors(path_integrated, world_plot)
 # Given a choice map of *constraints* that declare fixed values of some of the primitive choices, the operation `importance` proposes traces of the generative function that are consistent with these constraints.
 
 # %%
-model_importance = jax.jit(full_model.importance)
+key, k1, k2 = jax.random.split(key, 3)
+trace_low, log_weight_low = full_model.importance(
+    k1, constraints_low_deviation, (default_motion_settings, sensor_settings["s_noise"])
+)
+trace_high, log_weight_high = full_model.importance(
+    k2, constraints_high_deviation, (default_motion_settings, sensor_settings["s_noise"])
+)
 
-key, sub_key = jax.random.split(key)
-sample, log_weight = model_importance(
-    sub_key, constraints_low_deviation, (motion_settings_low_deviation, sensor_settings["s_noise"])
-)
-animate_full_trace(sample) | html("span.tc", f"log_weight: {log_weight}")
-# %%
-key, sub_key = jax.random.split(key)
-sample, log_weight = model_importance(
-    sub_key, constraints_high_deviation, (motion_settings_high_deviation, sensor_settings["s_noise"])
-)
-animate_full_trace(sample) | html("span.tc", f"log_weight: {log_weight}")
+(
+    (
+        html("fresh path sample", "fixed low motion-deviation sensor data")
+        | animate_full_trace(trace_low, frame_key="frame")
+        | html(f"log_weight: {log_weight_low}")
+    ) & (
+        html("fresh path sample", "fixed high motion-deviation sensor data")
+        | animate_full_trace(trace_high, frame_key="frame")
+        | html(f"log_weight: {log_weight_high}")
+    )
+) | Plot.Slider("frame", 0, T, fps=2)
+
 # %% [markdown]
 # A trace resulting from a call to `importance` is structurally indistinguishable from one drawn from `simulate`.  But there is a key *situational* difference: while `get_score` always returns the frequency with which `simulate` stochastically produces the trace, this value is **no longer equal to** the frequency with which the trace is stochastically produced by `importance`.  This is both true in an obvious and less relevant sense, as well as true in a more subtle and extremely germane sense.
 #
@@ -1843,7 +1860,7 @@ animate_full_trace(sample) | html("span.tc", f"log_weight: {log_weight}")
 # Thus in our running example, the projection in question is $\prod_{t=0}^T P_\text{sensor}(o_t)$.
 # %%
 key, sub_key = jax.random.split(key)
-log_weight - sample.project(sub_key, S["steps", "sensor", "distance"])
+log_weight_high - trace_high.project(sub_key, S["steps", "sensor", "distance"])
 
 
 # %% [markdown]
@@ -1858,54 +1875,36 @@ def constraint_from_path(path):
     c_ps = jax.vmap(lambda ix, p: C["steps", ix, "pose", "p"].set(p))(
         jnp.arange(T), path.p
     )
-
     c_hds = jax.vmap(lambda ix, hd: C["steps", ix, "pose", "hd"].set(hd))(
         jnp.arange(T), path.hd
     )
-    return c_ps + c_hds
+    return c_ps | c_hds
 
 constraints_path_integrated = constraint_from_path(path_integrated)
-constraints_path_integrated_observations_low_deviation = (
-    constraints_path_integrated | constraints_low_deviation
-)
-constraints_path_integrated_observations_high_deviation = (
-    constraints_path_integrated | constraints_high_deviation
-)
 
-key, sub_key = jax.random.split(key)
-trace_path_integrated_observations_low_deviation, w_low = model_importance(
-    sub_key,
-    constraints_path_integrated_observations_low_deviation,
+key, k1, k2 = jax.random.split(key, 3)
+trace_path_integrated_observations_low_deviation, log_weight_low = full_model.importance(
+    k1,
+    constraints_path_integrated | constraints_low_deviation,
     (motion_settings_low_deviation, sensor_settings["s_noise"]),
 )
-key, sub_key = jax.random.split(key)
-trace_path_integrated_observations_high_deviation, w_high = model_importance(
-    sub_key,
-    constraints_path_integrated_observations_high_deviation,
+trace_path_integrated_observations_high_deviation, log_weight_high = full_model.importance(
+    k2,
+    constraints_path_integrated | constraints_high_deviation,
     (motion_settings_high_deviation, sensor_settings["s_noise"]),
 )
 
-Plot.Row(*[
+(
     (
-        html("div.f3.b.tc", title)
-        | animate_full_trace(trace, frame_key="frame")
-        | html("span.tc", f"score: {score:,.2f}")
+        html("integrated path from controls", "fixed low motion-deviation sensor data")
+        | animate_full_trace(trace_path_integrated_observations_low_deviation, frame_key="frame")
+        | html(f"log_weight: {log_weight_low}")
+    ) & (
+        html("integrated path from controls", "fixed high motion-deviation sensor data")
+        | animate_full_trace(trace_path_integrated_observations_high_deviation, frame_key="frame")
+        | html(f"log_weight: {log_weight_high}")
     )
-    for (title, trace, motion_settings, score) in (
-        [
-            "Low deviation",
-            trace_path_integrated_observations_low_deviation,
-            motion_settings_low_deviation,
-            w_low,
-        ],
-        [
-            "High deviation",
-            trace_path_integrated_observations_high_deviation,
-            motion_settings_high_deviation,
-            w_high,
-        ],
-)
-]) | Plot.Slider("frame", 0, T, fps=2)
+) | Plot.Slider("frame", 0, T, fps=2)
 # %% [markdown]
 # ...more closely resembles the density of these data back-fitted onto typical (random) paths of the model.
 
@@ -1913,20 +1912,18 @@ Plot.Row(*[
 # %%
 N_samples = 200
 
-key, sub_key = jax.random.split(key)
-
+key, k1, k2 = jax.random.split(key, 3)
 traces_generated_low_deviation, low_weights = jax.vmap(
-    model_importance, in_axes=(0, None, None)
+    full_model.importance, in_axes=(0, None, None)
 )(
-    jax.random.split(sub_key, N_samples),
+    jax.random.split(k1, N_samples),
     constraints_low_deviation,
     (motion_settings_low_deviation, sensor_settings["s_noise"]),
 )
-
 traces_generated_high_deviation, high_weights = jax.vmap(
-    model_importance, in_axes=(0, None, None)
+    full_model.importance, in_axes=(0, None, None)
 )(
-    jax.random.split(sub_key, N_samples),
+    jax.random.split(k2, N_samples),
     constraints_high_deviation,
     (motion_settings_high_deviation, sensor_settings["s_noise"]),
 )
@@ -1934,16 +1931,18 @@ traces_generated_high_deviation, high_weights = jax.vmap(
 low_deviation_paths = jax.vmap(get_path)(traces_generated_low_deviation)
 high_deviation_paths = jax.vmap(get_path)(traces_generated_high_deviation)
 
-Plot.new(
-    world_plot,
-    [
-        pose_plots(pose, color="blue", opacity=0.1)
-        for pose in high_deviation_paths[:20]
-    ],
-    [
+(
+    world_plot
+    + [
         pose_plots(pose, color="green", opacity=0.1)
         for pose in low_deviation_paths[:20]
-    ],
+    ]
+) & (
+    world_plot
+    + [
+        pose_plots(pose, color="green", opacity=0.1)
+        for pose in high_deviation_paths[:20]
+    ]
 )
 
 # %% [markdown]
@@ -2026,76 +2025,95 @@ Plot.new(
 # ment over rejection sampling: intead of indefinitely constructing and rejecting samples, we can guarantee to use at least some of them after a fixed time, and we are using the best guesses among these.
 
 # %%
-N_presamples = 2000
-N_samples = 20
-
-def importance_sample(
+def importance_resample_unjitted(
     key: PRNGKey, constraints: genjax.ChoiceMap, motion_settings, s_noise, N: int, K: int
 ):
     """Produce K importance samples of depth N from the model. That is, K times, we
     generate N importance samples conditioned by the constraints, and categorically
     select one of them."""
     key1, key2 = jax.random.split(key)
-    samples, log_weights = jax.vmap(model_importance, in_axes=(0, None, None))(
+    samples, log_weights = jax.vmap(full_model.importance, in_axes=(0, None, None))(
         jax.random.split(key1, N * K), constraints, (motion_settings, s_noise)
     )
-    winners = jax.vmap(genjax.categorical.sampler)(
-        jax.random.split(key2, K), jnp.reshape(log_weights, (K, N))
-    )
+    winners = jax.vmap(genjax.categorical.propose)(
+        jax.random.split(key2, K), (jnp.reshape(log_weights, (K, N)),)
+    )[2]
     # indices returned are relative to the start of the K-segment from which they were drawn.
     # globalize the indices by adding back the index of the start of each segment.
     winners += jnp.arange(0, N * K, N)
     selected = jax.tree.map(lambda x: x[winners], samples)
     return selected
 
+importance_resample = jax.jit(importance_resample_unjitted, static_argnums=(4, 5))
 
-jit_resample = jax.jit(importance_sample, static_argnums=(4, 5))
 
-key, sub_key = jax.random.split(key)
-low_posterior = jit_resample(
-    sub_key, constraints_low_deviation, motion_settings_low_deviation, sensor_settings["s_noise"], N_presamples, N_samples
-)
-key, sub_key = jax.random.split(key)
-high_posterior = jit_resample(
-    sub_key, constraints_high_deviation, motion_settings_high_deviation, sensor_settings["s_noise"], N_presamples, N_samples
-)
+def pytree_transpose(list_of_pytrees):
+  """
+  Converts a list of pytrees of identical structure into a single pytree of lists.
+  """
+  return jax.tree.map(lambda *xs: jnp.array(list(xs)), *list_of_pytrees)
 
+def plot_inference_result(title, samples_label, posterior_paths, target_path, history_paths=None):
+    return (
+        html(*title)
+        | (
+            world_plot
+            + (
+                [
+                    Plot.line(
+                        {"x": path.p[:, 0], "y": path.p[:, 1]},
+                        curve="linear",
+                        opacity=0.05,
+                        strokeWidth=2,
+                        stroke="red"
+                    )
+                    for path in history_paths
+                ] if history_paths else []
+            )
+            + [
+                Plot.line(
+                    {"x": path.p[:, 0], "y": path.p[:, 1]},
+                    curve="linear",
+                    opacity=0.2,
+                    strokeWidth=2,
+                    stroke="green"
+                )
+                for path in posterior_paths
+            ]
+            + pose_plots(
+                target_path, fill=Plot.constantly("path to be inferred"), opacity = 0.5, strokeWidth=2
+            )
+            + Plot.color_map({
+                samples_label: "green",
+                "path to be inferred": "black",
+            } | (
+               {"culled paths": "red"} if history_paths else {}
+            ))
+        )
+    )
 
 # %%
-def path_to_polyline(path, **options):
-    if len(path.p.shape) > 1:
-        x_coords = path.p[:, 0]
-        y_coords = path.p[:, 1]
-        return Plot.line({"x": x_coords, "y": y_coords}, {"curve": "linear", **options})
-    else:
-        return Plot.dot([path.p], fill=options["stroke"], r=2, **options)
+N_presamples = 2000
+N_samples = 20
 
-(
-    world_plot
-    + [
-        path_to_polyline(path, opacity=0.2, strokeWidth=2, stroke="green")
-        for path in jax.vmap(get_path)(low_posterior)
-    ]
-    + [
-        path_to_polyline(path, opacity=0.2, strokeWidth=2, stroke="blue")
-        for path in jax.vmap(get_path)(high_posterior)
-    ]
-    + pose_plots(
-        path_low_deviation, fill=Plot.constantly("low deviation path"), opacity=0.2
-    )
-    + pose_plots(
-        path_high_deviation, fill=Plot.constantly("high deviation path"), opacity=0.2
-    )
-    + pose_plots(
-        path_integrated, fill=Plot.constantly("integrated path"), opacity=0.2
-    )
-    + Plot.color_map(
-        {
-            "low deviation path": "green",
-            "high deviation path": "blue",
-            "integrated path": "black",
-        }
-    )
+key, k1, k2 = jax.random.split(key, 3)
+low_posterior = importance_resample(
+    k1, constraints_low_deviation, motion_settings_low_deviation, sensor_settings["s_noise"], N_presamples, N_samples
+)
+high_posterior = importance_resample(
+    k2, constraints_high_deviation, motion_settings_high_deviation, sensor_settings["s_noise"], N_presamples, N_samples
+)
+
+plot_inference_result(
+    ("importance resampling on low motion-deviation data",),
+    "importance resamples",
+    jax.vmap(get_path)(low_posterior),
+    path_low_deviation
+) & plot_inference_result(
+    ("importance resampling on high motion-deviation data",),
+    "importance resamples",
+    jax.vmap(get_path)(high_posterior),
+    path_high_deviation
 )
 # %% [markdown]
 # Let's pause a moment to examine this chart. If the robot had no sensors, it would have no alternative but to estimate its position by integrating the control inputs to produce the integrated path in gray. In the low deviation setting, *the sensor data combined with importance sampling is enough* to give accurate results in the low deviation setting.
@@ -2199,37 +2217,32 @@ class SISwithRejuvenation(Generic[StateT, ControlT]):
         """
 
         def __init__(
-            self, N: int, end: StateT, samples: genjax.Trace[StateT], indices: IntArray
+            self, end: StateT, samples: genjax.Trace[StateT], indices: IntArray, rejuvenated: genjax.Trace[StateT]
         ):
-            self.N = N
             self.end = end
-            self.samples = samples
+            self.samples = samples.get_retval()
             self.indices = indices
+            self.rejuvenated = rejuvenated.get_retval()
+            self.N = len(end)
+            self.T = len(self.rejuvenated)
 
         def flood_fill(self) -> list[list[StateT]]:
-            samples = self.samples.get_retval()
-            active_paths = [[p] for p in samples[0]]
             complete_paths = []
-            for i in range(1, len(samples)):
-                indices = self.indices[i - 1]
-                counts = jnp.bincount(indices, length=self.N)
+            active_paths = self.N * [[]]
+            for i in range(self.T):
                 new_active_paths = self.N * [None]
-                for j in range(self.N):
-                    if counts[j] == 0:
-                        complete_paths.append(active_paths[j])
-                    new_active_paths[j] = active_paths[indices[j]] + [samples[i][j]]
+                for (j, count) in enumerate(jnp.bincount(self.indices[i], length=self.N)):
+                    if count == 0:
+                        complete_paths.append(active_paths[j] + [self.samples[i][j]])
+                    new_active_paths[j] = active_paths[self.indices[i][j]] + [self.rejuvenated[i][j]]
                 active_paths = new_active_paths
-
             return complete_paths + active_paths
 
         def backtrack(self) -> list[list[StateT]]:
             paths = [[p] for p in self.end]
-            samples = self.samples.get_retval()
-            for i in reversed(range(len(samples))):
-                for j in range(len(paths)):
-                    paths[j].append(samples[i][self.indices[i][j].item()])
-            for p in paths:
-                p.reverse()
+            for i in reversed(range(self.T - 1)):
+                for j in range(self.N):
+                    paths[j].insert(0, self.rejuvenated[i][self.indices[i + 1][j]])
             return paths
 
 
@@ -2241,9 +2254,9 @@ class SISwithRejuvenation(Generic[StateT, ControlT]):
             samples, log_weight_increments = jax.vmap(self.importance, in_axes=(0, 0, None, None))(
                 ks[0], particles, control, observation
             )
-            indices = jax.vmap(genjax.categorical.sampler, in_axes=(0, None))(
-                ks[1], log_weights + log_weight_increments
-            )
+            indices = jax.vmap(genjax.categorical.propose, in_axes=(0, None))(
+                ks[1], (log_weights + log_weight_increments,)
+            )[2]
             (resamples, antecedents) = jax.tree.map(lambda v: v[indices], (samples, particles))
             if self.rejuvenate:
                 rejuvenated, new_log_weights = jax.vmap(self.rejuvenate, in_axes=(0, 0, 0, None, None))(
@@ -2255,12 +2268,12 @@ class SISwithRejuvenation(Generic[StateT, ControlT]):
                 )
             else:
                 rejuvenated, new_log_weights = resamples, jnp.zeros(log_weights.shape)
-            return (rejuvenated.get_retval(), new_log_weights), (samples, indices)
+            return (rejuvenated.get_retval(), new_log_weights), (samples, indices, rejuvenated)
 
         init_array = jax.tree.map(
             lambda a: jnp.broadcast_to(a, (N,) + a.shape), self.init
         )
-        (end, _), (samples, indices) = jax.lax.scan(
+        (end, _), (samples, indices, rejuvenated) = jax.lax.scan(
             step,
             (init_array, jnp.zeros(N)),
             (
@@ -2269,7 +2282,7 @@ class SISwithRejuvenation(Generic[StateT, ControlT]):
                 self.observations,
             ),
         )
-        return SISwithRejuvenation.Result(N, end, samples, indices)
+        return SISwithRejuvenation.Result(end, samples, indices, rejuvenated)
 
 # %%
 def localization_sis(motion_settings, s_noise, observations):
@@ -2285,56 +2298,33 @@ def localization_sis(motion_settings, s_noise, observations):
     )
 
 
-# %%
-# This cell is included for convenience:
-# Rerun it to try out the SMC examples on a fresh instance of the problem.
-
-# Set `sensor_settings["s_noise"]` here, if you wish.
-
-key, k_low, k_high = jax.random.split(key, 3)
-trace_low_deviation = full_model.simulate(k_low, (motion_settings_low_deviation, sensor_settings["s_noise"]))
-trace_high_deviation = full_model.simulate(k_high, (motion_settings_high_deviation, sensor_settings["s_noise"]))
-path_low_deviation = get_path(trace_low_deviation)
-path_high_deviation = get_path(trace_high_deviation)
-observations_low_deviation = get_sensors(trace_low_deviation)
-observations_high_deviation = get_sensors(trace_high_deviation)
-
 # %% [markdown]
-# Below, totality of sampled partial paths are shown in green, those surviving to the end appearing the thickest, while the ground truth is shown in blue.
+# Below, the paths that died in the sequential resampling are shown in red.
 
 # %%
-N_particles = 100
+key, k1, k2 = jax.random.split(key, 3)
 
-def pose_list_to_plural_pose(pl: list[Pose]) -> Pose:
-    return Pose(jnp.array([pose.p for pose in pl]), [pose.hd for pose in pl])
-
-key, sub_key = jax.random.split(key)
-smc_result = localization_sis(
-    motion_settings_high_deviation, sensor_settings["s_noise"], observations_high_deviation
-).run(sub_key, N_particles)
-
-def plot_sis_result(ground_truth, smc_result):
-    return (
-        world_plot
-        + path_to_polyline(ground_truth, stroke="blue", strokeWidth=2)
-        + [
-            path_to_polyline(pose_list_to_plural_pose(p), opacity=0.1, stroke="green")
-            for p in smc_result.flood_fill()
-        ]
-    )
-
-plot_sis_result(path_high_deviation, smc_result)
-# %%
 N_particles = 20
-
-key, sub_key = jax.random.split(key)
-low_smc_result = localization_sis(
+sis_result_low = localization_sis(
     motion_settings_low_deviation, sensor_settings["s_noise"], observations_low_deviation
-).run(sub_key, N_particles)
+).run(k1, N_particles)
+sis_result_high = localization_sis(
+    motion_settings_high_deviation, sensor_settings["s_noise"], observations_high_deviation
+).run(k2, N_particles)
 
-plot_sis_result(path_low_deviation, low_smc_result)
-
-
+plot_inference_result(
+    ("SIS on low motion-deviation data",),
+    "sequential importance resamples",
+    [pytree_transpose(path) for path in sis_result_low.backtrack()],
+    path_low_deviation,
+    history_paths=[pytree_transpose(path) for path in sis_result_low.flood_fill()]
+) & plot_inference_result(
+    ("SIS on high motion-deviation data",),
+    "sequential importance resamples",
+    [pytree_transpose(path) for path in sis_result_high.backtrack()],
+    path_high_deviation,
+    history_paths=[pytree_transpose(path) for path in sis_result_high.flood_fill()]
+)
 # %% [markdown]
 # As already noted, after winnowing poor quality particles and replacing them with copies of the better ones, particle diversity suffers.  The technique of *rejuvenation* is to perturb the results of resampling to restore this diversity.  At the same time, it can perform operations that improve the sample quality.  In this case, we search a small grid of points near the most recent step for improvement in the score.
 #
@@ -2405,7 +2395,7 @@ def grid_bwd_proposal(new_sample, args):
 # %%
 def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, observations):
     base_grid = make_poses_grid_array(
-        jnp.array([M_grid / 2.0, M_grid / 2.0]).T,
+        jnp.array([M_grid / 2, M_grid / 2]).T,
         N_grid
     )
     return SISwithRejuvenation(
@@ -2431,16 +2421,28 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # The following plots compare the performance of this local grid search rejuvenation scheme (first) versus vanilla sequential importance sampling (second).
 
 # %%
-N_particles = 100
-M_grid = jnp.array([0.5, 0.5, jnp.pi/600.0])
+N_particles = 20
+M_grid = jnp.array([0.5, 0.5, (3 / 10) * degrees])
 N_grid = jnp.array([15, 15, 15])
 
-key, sub_key = jax.random.split(key)
-smc_result = localization_sis_plus_grid_rejuv(
-    motion_settings_high_deviation, sensor_settings["s_noise"], M_grid, N_grid, observations_high_deviation
-).run(sub_key, N_particles)
-imp_result = localization_sis(
+key, k1, k2 = jax.random.split(key, 3)
+sis_result = localization_sis(
     motion_settings_high_deviation, sensor_settings["s_noise"], observations_high_deviation
-).run(sub_key, N_particles)
+).run(k1, N_particles)
+smcp3_result = localization_sis_plus_grid_rejuv(
+    motion_settings_high_deviation, sensor_settings["s_noise"], M_grid, N_grid, observations_high_deviation
+).run(k2, N_particles)
 
-plot_sis_result(path_high_deviation, smc_result) | plot_sis_result(path_high_deviation, imp_result)
+plot_inference_result(
+    ("SIS without rejuvenation", "high motion-deviation data"),
+    "samples",
+    [pytree_transpose(path) for path in sis_result.backtrack()],
+    path_high_deviation,
+    history_paths=[pytree_transpose(path) for path in sis_result.flood_fill()]
+) & plot_inference_result(
+    ("SIS with SMCP3 grid rejuvenation", "high motion-deviation data"),
+    "samples",
+    [pytree_transpose(path) for path in smcp3_result.backtrack()],
+    path_high_deviation,
+    history_paths=[pytree_transpose(path) for path in smcp3_result.flood_fill()]
+)
