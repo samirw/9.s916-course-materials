@@ -8,9 +8,9 @@
 #       extension: .py
 #       format_name: percent
 #       format_version: '1.3'
-#       jupytext_version: 1.11.2
+#       jupytext_version: 1.16.7
 #   kernelspec:
-#     display_name: default
+#     display_name: Python 3 (ipykernel)
 #     language: python
 #     name: python3
 # ---
@@ -33,7 +33,7 @@
 #
 # Here are two large notebook cells.  The first cell declares all the reusable components from the tutorial (modeling and inference gadgets, and plotting abstractions), making them globally available while performing no significant computation.  The second cell gathers the main visualization recipes in a series of commented blocks; each block can be run independently.
 #
-# After running the first of these, skip below to the following sections.
+# After running the first of these cells, skip below to the following sections, which contain the exercises *per se*.
 # %%
 # Global includes
 
@@ -364,22 +364,22 @@ def update_ideal_sensors(widget, label):
 
 # Noisy sensors
 
-sensor_settings["s_noise"] = 0.1
+model_sensor_noise = 0.1
 
 @genjax.gen
-def sensor_model_one(pose, angle, s_noise):
+def sensor_model_one(pose, angle, sensor_noise):
     return (
         genjax.normal(
             sensor_distance(pose.rotate(angle), world["walls"], sensor_settings["box_size"]),
-            s_noise,
+            sensor_noise,
         )
         @ "distance"
     )
 
 sensor_model = sensor_model_one.vmap(in_axes=(None, 0, None))
 
-def noisy_sensor(key, pose, s_noise):
-    return sensor_model.propose(key, (pose, sensor_angles, s_noise))[2]
+def noisy_sensor(key, pose, sensor_noise):
+    return sensor_model.propose(key, (pose, sensor_angles, sensor_noise))[2]
 
 def noise_slider(key, label, init):
     return Plot.Slider(
@@ -517,7 +517,7 @@ def camera_widget(
             )
             + pose_widget("camera", camera_pose, color="blue")
         )
-        | noise_slider("world_noise", "World/data noise = ", sensor_settings["s_noise"])
+        | noise_slider("world_noise", "World/data noise = ", model_sensor_noise)
         | Plot.html([
             "p",
             "Prior:",
@@ -529,7 +529,7 @@ def camera_widget(
                 ["option", {"value": "localized"}, "localized"],
             ]
         ])
-        | noise_slider("model_noise", "Model/inference noise = ", sensor_settings["s_noise"])
+        | noise_slider("model_noise", "Model/inference noise = ", model_sensor_noise)
         | (
             Plot.html([
                 "button",
@@ -720,7 +720,7 @@ def step_model(motion_settings, start, control):
     return physical_step(start.p, p, hd)
 
 degrees = jnp.pi / 180
-default_motion_settings = {
+model_motion_settings = {
     "p_noise": 0.15,
     "hd_noise": 1 * degrees
 }
@@ -748,14 +748,14 @@ def plot_path_with_confidence(path, step):
         world_plot
         + confidence_circle(
             [prev_step.apply_control(robot_inputs["controls"][step]).p],
-            default_motion_settings["p_noise"]
+            model_motion_settings["p_noise"]
         )
         + [pose_plots(path[i]) for i in range(step)]
         + pose_plots(path[step], color=Plot.constantly("next pose"))
         + Plot.color_map({"previous poses": "black", "next pose": "green"})
     )
 
-def animate_path_and_sensors(path, readings, motion_settings, frame_key=None):
+def animate_path_and_sensors(path, readings, frame_key=None):
     return Plot.Frames([
         plot_path_with_confidence(path, step)
         + plot_sensors(pose, readings[step], sensor_angles)
@@ -766,17 +766,16 @@ def animate_path_and_sensors(path, readings, motion_settings, frame_key=None):
 # Full model
 
 @genjax.gen
-def full_model_kernel(motion_settings, s_noise, state, control):
+def full_model_kernel(motion_settings, sensor_noise, state, control):
     pose = step_model(motion_settings, state, control) @ "pose"
-    sensor_model(pose, sensor_angles, s_noise) @ "sensor"
+    sensor_model(pose, sensor_angles, sensor_noise) @ "sensor"
     return pose
 
 @genjax.gen
-def full_model(motion_settings, s_noise):
+def full_model(motion_settings, sensor_noise):
     return (
         full_model_kernel
-        .partial_apply(motion_settings)
-        .partial_apply(s_noise)
+        .partial_apply(motion_settings, sensor_noise)
         .map(diag)
         .scan()(robot_inputs["start"], robot_inputs["controls"])
         @ "steps"
@@ -796,8 +795,8 @@ motion_settings_high_deviation = {
 
 key = jax.random.key(0)
 key, k_low, k_high = jax.random.split(key, 3)
-trace_low_deviation = full_model.simulate(k_low, (motion_settings_low_deviation, sensor_settings["s_noise"]))
-trace_high_deviation = full_model.simulate(k_high, (motion_settings_high_deviation, sensor_settings["s_noise"]))
+trace_low_deviation = full_model.simulate(k_low, (motion_settings_low_deviation, model_sensor_noise))
+trace_high_deviation = full_model.simulate(k_high, (motion_settings_high_deviation, model_sensor_noise))
 
 def get_path(trace):
     return trace.get_retval()[1]
@@ -808,9 +807,8 @@ def get_sensors(trace):
 def animate_full_trace(trace, frame_key=None):
     path = get_path(trace)
     readings = get_sensors(trace)
-    motion_settings = trace.get_args()[0]
     return animate_path_and_sensors(
-        path, readings, motion_settings, frame_key=frame_key
+        path, readings, frame_key=frame_key
     )
 
 def constraint_from_path(path):
@@ -822,6 +820,7 @@ def constraint_from_path(path):
     )
     return c_ps | c_hds
 
+
 path_low_deviation = get_path(trace_low_deviation)
 path_high_deviation = get_path(trace_high_deviation)
 observations_low_deviation = get_sensors(trace_low_deviation)
@@ -829,18 +828,20 @@ observations_high_deviation = get_sensors(trace_high_deviation)
 constraints_low_deviation = C["steps", "sensor", "distance"].set(observations_low_deviation)
 constraints_high_deviation = C["steps", "sensor", "distance"].set(observations_high_deviation)
 
+constraints_path_integrated = constraint_from_path(path_integrated)
+
 
 # Whole-path importance resampling
 
 def importance_resample_unjitted(
-    key: PRNGKey, constraints: genjax.ChoiceMap, motion_settings, s_noise, N: int, K: int
+    key: PRNGKey, constraints: genjax.ChoiceMap, motion_settings, sensor_noise, N: int, K: int
 ):
     """Produce K importance samples of depth N from the model. That is, K times, we
     generate N importance samples conditioned by the constraints, and categorically
     select one of them."""
     key1, key2 = jax.random.split(key)
     samples, log_weights = jax.vmap(full_model.importance, in_axes=(0, None, None))(
-        jax.random.split(key1, N * K), constraints, (motion_settings, s_noise)
+        jax.random.split(key1, N * K), constraints, (motion_settings, sensor_noise)
     )
     winners = jax.vmap(genjax.categorical.propose)(
         jax.random.split(key2, K), (jnp.reshape(log_weights, (K, N)),)
@@ -1034,7 +1035,7 @@ class SISwithRejuvenation(Generic[StateT, ControlT]):
         )
         return SISwithRejuvenation.Result(end, samples, indices, rejuvenated)
 
-def localization_sis(motion_settings, s_noise, observations):
+def localization_sis(motion_settings, sensor_noise, observations):
     return SISwithRejuvenation(
         robot_inputs["start"],
         robot_inputs["controls"],
@@ -1042,7 +1043,7 @@ def localization_sis(motion_settings, s_noise, observations):
         lambda key, pose, control, observation: full_model_kernel.importance(
             key,
             C["sensor", "distance"].set(observation),
-            (motion_settings, s_noise, pose, control),
+            (motion_settings, sensor_noise, pose, control),
         ),
     )
 
@@ -1104,9 +1105,9 @@ def grid_bwd_proposal(new_sample, args):
     # Since the backward proposal is only used for assessing the above choice,
     # no further computation is necessary.
 
-def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, observations):
+def localization_sis_plus_grid_rejuv(motion_settings, sensor_noise, M_grid, N_grid, observations):
     base_grid = make_poses_grid_array(
-        jnp.array([M_grid / 2, M_grid / 2]).T,
+        jnp.array([-M_grid / 2, M_grid / 2]).T,
         N_grid
     )
     return SISwithRejuvenation(
@@ -1116,14 +1117,14 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
         importance=lambda key, pose, control, observation: full_model_kernel.importance(
             key,
             C["sensor", "distance"].set(observation),
-            (motion_settings, s_noise, pose, control),
+            (motion_settings, sensor_noise, pose, control),
         ),
         rejuvenate=lambda key, sample, pose, control, observation: run_SMCP3_step(
             grid_fwd_proposal,
             grid_bwd_proposal,
             key,
             sample,
-            (base_grid, observation, (motion_settings, s_noise, pose, control))
+            (base_grid, observation, (motion_settings, sensor_noise, pose, control))
         ),
     )
 
@@ -1199,11 +1200,11 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 #         + plot_sensors(js("$state.pose"), js("$state.pose_readings"), sensor_angles)
 #         + pose_widget("pose", some_pose, color="blue")
 #     )
-#     | noise_slider("noise_slider", "Sensor noise =", sensor_settings["s_noise"])
+#     | noise_slider("noise_slider", "Sensor noise =", model_sensor_noise)
 #     | Plot.html(js("`pose = Pose([${$state.pose.p.map((x) => x.toFixed(2))}], ${$state.pose.hd.toFixed(2)})`"))
 #     | Plot.initialState({
 #         "k": jax.random.key_data(k1),
-#         "pose_readings": noisy_sensor(k2, some_pose, sensor_settings["s_noise"])
+#         "pose_readings": noisy_sensor(k2, some_pose, model_sensor_noise)
 #     }, sync={"k"})
 #     | Plot.onChange({"pose": on_slider_change, "noise_slider": on_slider_change})
 # )
@@ -1214,15 +1215,15 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # key, k1, k2, k3 = jax.random.split(key, 4)
 # guess_pose = Pose(jnp.array([2.0, 16.0]), jnp.array(0.0))
 # target_pose = Pose(jnp.array([15.0, 4.0]), jnp.array(-1.6))
-# def likelihood_function(cm, pose, s_noise):
-#     return sensor_model.assess(cm, (pose, sensor_angles, s_noise))[0]
+# def likelihood_function(cm, pose, sensor_noise):
+#     return sensor_model.assess(cm, (pose, sensor_angles, sensor_noise))[0]
 # def on_guess_pose_chage(widget, _):
 #     update_ideal_sensors(widget, "guess")
 #     widget.state.update({"likelihood":
 #         likelihood_function(
 #             C["distance"].set(widget.state.target_readings),
 #             pose_at(widget.state, "guess"),
-#             sensor_settings["s_noise"]
+#             model_sensor_noise
 #         )
 #     })
 # def on_target_pose_chage(widget, _):
@@ -1231,7 +1232,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 #         likelihood_function(
 #             C["distance"].set(widget.state.target_readings),
 #             pose_at(widget.state, "guess"),
-#             sensor_settings["s_noise"]
+#             model_sensor_noise
 #         )
 #     })
 # (
@@ -1282,7 +1283,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 #         ),
 #         cols=2
 #     )
-#     | noise_slider("noise_slider", "Sensor noise =", sensor_settings["s_noise"])
+#     | noise_slider("noise_slider", "Sensor noise =", model_sensor_noise)
 #     | (
 #         Plot.html([
 #             "label",
@@ -1304,8 +1305,8 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 #         {
 #             "k": jax.random.key_data(k1),
 #             "guess_readings": ideal_sensor(guess_pose),
-#             "target_readings": (initial_target_readings := noisy_sensor(k3, target_pose, sensor_settings["s_noise"])),
-#             "likelihood": likelihood_function(C["distance"].set(initial_target_readings), guess_pose, sensor_settings["s_noise"]),
+#             "target_readings": (initial_target_readings := noisy_sensor(k3, target_pose, model_sensor_noise)),
+#             "likelihood": likelihood_function(C["distance"].set(initial_target_readings), guess_pose, model_sensor_noise),
 #             "show_target_pose": False,
 #         }, sync={"k", "target_readings"})
 #     | Plot.onChange({
@@ -1543,7 +1544,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 #     k1, k2 = jax.random.split(jax.random.wrap_key_data(widget.state.k))
 #     samples = jax.vmap(step_model.propose, in_axes=(0, None))(
 #         jax.random.split(k1, N_samples),
-#         (default_motion_settings, tilted_start, Control(ds, dhd)),
+#         (model_motion_settings, tilted_start, Control(ds, dhd)),
 #     )[2]
 #     widget.state.update({
 #         "k": jax.random.key_data(k2),
@@ -1552,7 +1553,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # (
 #     (
 #         world_plot
-#         + confidence_circle(js("[$state.step.p]"), default_motion_settings["p_noise"])
+#         + confidence_circle(js("[$state.step.p]"), model_motion_settings["p_noise"])
 #         + pose_plots(js("$state.samples"), color=Plot.constantly("samples from the step model"))
 #         + pose_plots(js("$state.start"), color=Plot.constantly("start pose"))
 #         + pose_widget("step", robot_inputs["start"], color=Plot.constantly("attempt to step to here"))
@@ -1570,7 +1571,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 #         "samples": (
 #             jax.vmap(step_model.propose, in_axes=(0, None))(
 #                 jax.random.split(k2, N_samples),
-#                 (default_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]),
+#                 (model_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]),
 #             )[2].as_dict()
 #         ),
 #     }, sync={"k"})
@@ -1581,7 +1582,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # # Path model
 
 # key, sample_key = jax.random.split(key)
-# path = path_model.propose(sample_key, (default_motion_settings,))[2][1]
+# path = path_model.propose(sample_key, (model_motion_settings,))[2][1]
 # Plot.Frames(
 #     [
 #         plot_path_with_confidence(path, step)
@@ -1595,7 +1596,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # key, sub_key = jax.random.split(key)
 # sample_paths = jax.vmap(
 #     lambda k:
-#         path_model.propose(k, (default_motion_settings,))[2][1]
+#         path_model.propose(k, (model_motion_settings,))[2][1]
 # )(jax.random.split(sub_key, N_samples))
 # Plot.html([
 #     "div.grid.grid-cols-2.gap-4",
@@ -1606,8 +1607,8 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # # Full model
 
 # key, sub_key = jax.random.split(key)
-# cm, _, retval = full_model.propose(sub_key, (default_motion_settings, sensor_settings["s_noise"]))
-# animate_path_and_sensors(retval[1], cm["steps", "sensor", "distance"], default_motion_settings)
+# cm, _, retval = full_model.propose(sub_key, (model_motion_settings, model_sensor_noise))
+# animate_path_and_sensors(retval[1], cm["steps", "sensor", "distance"])
 
 
 # # Updating traces
@@ -1615,7 +1616,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # key, k1, k2 = jax.random.split(key, 3)
 # trace = step_model.simulate(
 #     k1,
-#     (default_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]),
+#     (model_motion_settings, robot_inputs["start"], robot_inputs["controls"][0]),
 # )
 # rotated_trace, rotated_trace_weight_diff, _, _ = trace.update(
 #     k2, C["hd"].set(jnp.pi / 2)
@@ -1631,7 +1632,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # ) | html(f"score ratio: {rotated_trace_weight_diff}")
 
 # key, k1, k2 = jax.random.split(key, 3)
-# trace = path_model.simulate(k1, (default_motion_settings,))
+# trace = path_model.simulate(k1, (model_motion_settings,))
 # rotated_first_step, rotated_first_step_weight_diff, _, _ = trace.update(
 #     k2, C["steps", 0, "hd"].set(jnp.pi / 2)
 # )
@@ -1652,7 +1653,7 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # # Animating full traces
 
 # key, sub_key = jax.random.split(key)
-# tr = full_model.simulate(sub_key, (default_motion_settings, sensor_settings["s_noise"]))
+# tr = full_model.simulate(sub_key, (model_motion_settings, model_sensor_noise))
 # animate_full_trace(tr)
 
 # (
@@ -1670,10 +1671,10 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 
 # key, k1, k2 = jax.random.split(key, 3)
 # trace_low, log_weight_low = full_model.importance(
-#     k1, constraints_low_deviation, (default_motion_settings, sensor_settings["s_noise"])
+#     k1, constraints_low_deviation, (model_motion_settings, model_sensor_noise)
 # )
 # trace_high, log_weight_high = full_model.importance(
-#     k2, constraints_high_deviation, (default_motion_settings, sensor_settings["s_noise"])
+#     k2, constraints_high_deviation, (model_motion_settings, model_sensor_noise)
 # )
 # (
 #     (
@@ -1688,16 +1689,55 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # ) | Plot.Slider("frame", 0, T, fps=2)
 
 
+# Unlikely likelihoods histograms
+
+# N_samples = 200
+# key, k1, k2, k3, k4 = jax.random.split(key, 5)
+# traces_generated_low_deviation, low_weights = jax.vmap(
+#     full_model.importance, in_axes=(0, None, None)
+# )(
+#     jax.random.split(k1, N_samples),
+#     constraints_low_deviation,
+#     (model_motion_settings, model_sensor_noise),
+# )
+# traces_generated_high_deviation, high_weights = jax.vmap(
+#     full_model.importance, in_axes=(0, None, None)
+# )(
+#     jax.random.split(k2, N_samples),
+#     constraints_high_deviation,
+#     (model_motion_settings, model_sensor_noise),
+# )
+# traces_simulated = jax.vmap(
+#     full_model.simulate, in_axes=(0, None)
+# )(
+#     jax.random.split(k3, N_samples),
+#     (model_motion_settings, model_sensor_noise),
+# )
+# simulated_weights = jax.vmap(
+#     lambda trace, k: trace.project(k, S["steps", "sensor", "distance"])
+# )(traces_simulated, jax.random.split(k4, N_samples))
+# (
+#     html("likelihoods of low motion-deviation data")
+#     | Plot.histogram(values=low_weights, thresholds=10)
+# ) & (
+#     html("likelihoods of high motion-deviation data")
+#     | Plot.histogram(values=high_weights, thresholds=10)
+# ) & (
+#     html("likelihoods of random data")
+#     | Plot.histogram(values=simulated_weights, thresholds=10)
+# )
+
+
 # # Whole-path importance resampling
 
 # N_presamples = 2000
 # N_samples = 20
 # key, k1, k2 = jax.random.split(key, 3)
 # low_posterior = importance_resample(
-#     k1, constraints_low_deviation, motion_settings_low_deviation, sensor_settings["s_noise"], N_presamples, N_samples
+#     k1, constraints_low_deviation, model_motion_settings, model_sensor_noise, N_presamples, N_samples
 # )
 # high_posterior = importance_resample(
-#     k2, constraints_high_deviation, motion_settings_high_deviation, sensor_settings["s_noise"], N_presamples, N_samples
+#     k2, constraints_high_deviation, model_motion_settings, model_sensor_noise, N_presamples, N_samples
 # )
 # plot_inference_result(
 #     ("importance resampling on low motion-deviation data",),
@@ -1717,10 +1757,10 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # key, k1, k2 = jax.random.split(key, 3)
 # N_particles = 20
 # sis_result_low = localization_sis(
-#     motion_settings_low_deviation, sensor_settings["s_noise"], observations_low_deviation
+#     model_motion_settings, model_sensor_noise, observations_low_deviation
 # ).run(k1, N_particles)
 # sis_result_high = localization_sis(
-#     motion_settings_high_deviation, sensor_settings["s_noise"], observations_high_deviation
+#     model_motion_settings, model_sensor_noise, observations_high_deviation
 # ).run(k2, N_particles)
 # plot_inference_result(
 #     ("SIS on low motion-deviation data",),
@@ -1744,10 +1784,10 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 # N_grid = jnp.array([15, 15, 15])
 # key, k1, k2 = jax.random.split(key, 3)
 # sis_result = localization_sis(
-#     motion_settings_high_deviation, sensor_settings["s_noise"], observations_high_deviation
+#     model_motion_settings, model_sensor_noise, observations_high_deviation
 # ).run(k1, N_particles)
 # smcp3_result = localization_sis_plus_grid_rejuv(
-#     motion_settings_high_deviation, sensor_settings["s_noise"], M_grid, N_grid, observations_high_deviation
+#     model_motion_settings, model_sensor_noise, M_grid, N_grid, observations_high_deviation
 # ).run(k2, N_particles)
 # plot_inference_result(
 #     ("SIS without rejuvenation", "high motion-deviation data"),
@@ -1762,3 +1802,180 @@ def localization_sis_plus_grid_rejuv(motion_settings, s_noise, M_grid, N_grid, o
 #     path_high_deviation,
 #     history_paths=[pytree_transpose(path) for path in smcp3_result.flood_fill()]
 # )
+
+# %% [markdown]
+# ## Exercise 0
+#
+# Lab 1 Exercise 0: Visualize results of different inference algorithms and write 2 sentences about each.
+
+# %%
+# Complete Execrcise 0 here
+
+# %% [markdown]
+# ## Exercise 1
+#
+# Lab 1 Exercise 1: Write a few custom priors. Produce traces of the new generative function and visualize them.
+
+# %%
+# Complete Execrcise 1 here
+
+# %% [markdown]
+# ## Exercise 2
+#
+# Lab 1 Exercise 2: Write Metropolis-Hastings (MH) by hand and write tests to verify its correctness. Use it by running it 1 million times and visualize the results
+
+# %%
+# Complete Execrcise 2 here
+
+# %% [markdown]
+# ## Exercise 3
+
+# %% [markdown]
+# The following two cells work together:
+# * the first declares reproducible state;
+# * the second generates a trace, runs inference over its sensor data, and displays all the results.
+#
+#
+# The parameters have the following meanings.
+# 1. The world motion deviation corresponds to *how wide our hypotheses will need to range* in order to infer the path.
+# 2. The world sensor noise corresponds to *how reliable the data are* for doing this inference.
+# 3. The model motion deviation corresponds to *how wide our prior* over paths is.
+# 4. The model sensor noise corresponds to *how tolerant versus avoidant* we are of incongruous data.
+#
+# By varying the state in the first cell, investigate the following issues.  **To report your findings, copy-paste suitable reproducible state into the cells below, and add sufficient text/comments for the reader to follow.**
+# 1. Low world motion deviation and high world sensor noise:
+#    * There is not much reliable information to work with, so inference does little to bias samples from the prior towards the posterior.  However, the prior is already somewhat close to the posterior, so global SIR appears to do well enough.  Although SMCP3 nails the answer, it does so at much greater computational expense.
+# 2. High world motion deviation and low world sensor noise:
+#    * The reliable information clearly tells us our inference to do *something*.  However, the prior being far from the posterior, SIR has trouble producing good hypotheses, while SMCP3 is able to search for them.
+# 3. In the prior two scenarios, when might tighter/looser deviation/noise help/hurt inference?
+# 4. What inference computational cost (`N_this`, `N_that`) seems to be enough?
+
+# %%
+# Set reproducible state here!
+
+key = jax.random.key(1)
+
+
+# Data generation params
+
+world_motion_settings = {
+    "p_noise": 0.15,
+    "hd_noise": 0.5 * degrees,
+}
+world_sensor_noise = 0.3
+
+
+# Inference params
+
+model_motion_settings = {
+    "p_noise": 0.15,
+    "hd_noise": 1 * degrees
+}
+model_sensor_noise = 0.1
+
+# SIR
+N_presamples = 2000
+N_samples = 20
+
+# SMCP3
+N_particles = 20
+M_grid = jnp.array([1.0, 1.0, (3 / 10) * degrees])
+N_grid = jnp.array([15, 15, 15])
+
+# %%
+key, k1, k2, k3 = jax.random.split(key, 4)
+
+some_trace = full_model.simulate(k1, (world_motion_settings, world_sensor_noise))
+some_path = get_path(some_trace)
+some_observations = get_sensors(some_trace)
+some_constraints = C["steps", "sensor", "distance"].set(some_observations)
+
+SIR_posterior = importance_resample(
+    k2, some_constraints, model_motion_settings, model_sensor_noise, N_presamples, N_samples
+)
+
+smcp3_result = localization_sis_plus_grid_rejuv(
+    model_motion_settings, model_sensor_noise, M_grid, N_grid, some_observations
+).run(k3, N_particles)
+
+(
+    animate_full_trace(some_trace)
+    | (
+        plot_inference_result(
+            ("global importance resampling",),
+            "samples",
+            jax.vmap(get_path)(SIR_posterior),
+            some_path
+        ) & plot_inference_result(
+            ("SIS with SMCP3 grid rejuvenation",),
+            "samples",
+            [pytree_transpose(path) for path in smcp3_result.backtrack()],
+            some_path,
+            history_paths=[pytree_transpose(path) for path in smcp3_result.flood_fill()]
+        )
+    )
+)
+
+# %%
+# DELETE ME
+# low world motion deviation, high world sensor noise
+
+key = jax.random.key(0)
+
+world_motion_settings = {
+    "p_noise": 0.05,
+    "hd_noise": 0.1 * degrees,
+}
+world_sensor_noise = 0.75
+
+model_motion_settings = {
+    "p_noise": 0.15,
+    "hd_noise": 1 * degrees
+}
+model_sensor_noise = 0.1
+
+# SIR
+N_presamples = 2000
+N_samples = 20
+
+# SMCP3
+N_particles = 20
+M_grid = jnp.array([1.0, 1.0, (3 / 10) * degrees])
+N_grid = jnp.array([15, 15, 15])
+
+# %%
+# DELETE ME
+# high world motion deviation, low world sensor noise
+
+key = jax.random.key(2)
+
+world_motion_settings = {
+    "p_noise": 0.5,
+    "hd_noise": 1.5 * degrees,
+}
+world_sensor_noise = 0.05
+
+model_motion_settings = {
+    "p_noise": 0.15,
+    "hd_noise": 1 * degrees
+}
+model_sensor_noise = 0.1
+
+# SIR
+N_presamples = 2000
+N_samples = 20
+
+# SMCP3
+N_particles = 20
+M_grid = jnp.array([1.0, 1.0, (3 / 10) * degrees])
+N_grid = jnp.array([15, 15, 15])
+
+# %%
+# Clear label/comments goes here.
+
+# Copy of modified reproducible state cell goes here.
+
+# %%
+# Another here...
+
+# And so on...
